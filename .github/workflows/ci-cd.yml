@@ -1,0 +1,82 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Unit tests (Lambda + CDK assertions)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Run tests
+        run: pytest -v
+
+  synth:
+    name: CDK synth
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install CDK
+        run: |
+          pip install -r requirements.txt
+          npm install -g aws-cdk@2
+      - name: Synthesize CloudFormation templates
+        run: cdk synth --all
+
+  deploy:
+    name: Deploy to AWS (OIDC, no stored keys)
+    runs-on: ubuntu-latest
+    needs: synth
+    # Runs only on main, and only after the one-time AWS setup has been done (see README)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.AWS_DEPLOY_ROLE_ARN != ''
+    permissions:
+      id-token: write   # lets the job request a GitHub OIDC token
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install CDK
+        run: |
+          pip install -r requirements.txt
+          npm install -g aws-cdk@2
+      - name: Get short-lived AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+      - name: Confirm identity
+        run: aws sts get-caller-identity
+      - name: Deploy
+        env:
+          ALERT_EMAIL: ${{ vars.ALERT_EMAIL }}
+        run: |
+          EXTRA=""
+          if [ -n "$ALERT_EMAIL" ]; then EXTRA="-c alertEmail=$ALERT_EMAIL"; fi
+          cdk deploy UptimeMonitorStack --require-approval never $EXTRA
